@@ -1650,6 +1650,157 @@
   (retractions rel [(vec tuple)]))
 
 ;; =============================================================================
+;; Persistent Memory Tables
+
+(defprotocol ITableRel
+  (add-rows [this rows] "Return an ITableRel with the given rows added")
+  (remove-rows [this rows] "Return an ITableRel with the given rows removed")
+  (all-rows [this] "Return a set of all of the rows in the table")
+  (arity-of [this] "Return the arity (number of columns) in the table"))
+
+(defn lazy-intersection
+  "Lazily compute the intersection of the given sets."
+  [sets]
+  (if (seq sets)
+    (let [[source & filters] (sort-by count sets)]
+      (filter (fn [element]
+                (every? #(% element) filters))
+              source))))
+
+(defmacro make-table-rel-ctor
+  [ncols idxs]
+  (let [rows (gensym "rows")
+        indexes (gensym "indexes")
+        subst (gensym "subst")
+        set (gensym "set")
+        arg-sym #(symbol (str "arg" %))
+        idx-sym #(symbol (str "idx" %))
+        args (vec (map arg-sym (range ncols)))
+        check-arg (fn [i] `(let [wa# (walk* ~subst ~(arg-sym i))]
+                             (if-not (contains-lvar? wa#)
+                               (~(idx-sym i) wa#))))
+        idx-sets (vec (map check-arg idxs))
+        single-idx-set (->>
+                        idxs
+                        reverse
+                        (map (fn [i]
+                               (fn [else-branch]
+                                 `(let [wa# (walk* ~subst ~(arg-sym i))]
+                                    (if (contains-lvar? wa#)
+                                      ~else-branch
+                                      (~(idx-sym i) wa#))))))
+                        (reduce (fn [code f]
+                                  (f code))
+                                rows))
+        gen-stream `(to-stream
+                     (->> ~set
+                          (map (fn [cand#]
+                                 (when-let [~subst (unify ~subst [~@args] cand#)]
+                                   ~subst)))
+                          (remove nil?)))]
+    `(fn [~rows ~indexes]
+       (let [~@(mapcat (fn [i] [(idx-sym i) `(~indexes ~i)]) idxs)]
+         (fn [~@args]
+           (fn [~subst]
+             ~(cond
+               (empty? idxs)
+               `(let [~set ~rows]
+                  ~gen-stream)
+
+               (= (count idxs) 1)
+               `(let [~set ~single-idx-set]
+                  ~gen-stream)
+
+               :else
+               `(let [indexed-sets# (remove nil? ~idx-sets)
+                      ~set (if (seq indexed-sets#)
+                             (lazy-intersection indexed-sets#)
+                             ~rows)]
+                  ~gen-stream))))))))
+
+(declare row-diff-impl)
+
+(defmacro TableRelHelper
+  [arity]
+  (let [sigs (map (fn [n]
+                    (let [args (map a-sym (range 0 n))]
+                      `(~'invoke [~'_ ~@args] (~'f ~@args))))
+                  (range 1 (+ arity 2)))]
+    `(deftype ~'TableRel ~'[meta rows indexes arity ^clojure.lang.IFn f g]
+       clojure.lang.IObj
+       (~'withMeta [~'this ~'meta]
+         (~'TableRel. ~'meta ~'rows ~'indexes ~'arity ~'f ~'g))
+       (~'meta [~'_]
+         ~'meta)
+       clojure.lang.IFn
+       ~@sigs
+       (~'applyTo [~'_ ~'arglist]
+           (~'.applyTo ~'f ~'arglist))
+       ITableRel
+       (~'add-rows [~'this ~'new-rows]
+         (if (seq ~'new-rows)
+           (row-diff-impl ~'this ~'new-rows conj)
+           ~'this))
+       (~'remove-rows [~'this ~'new-rows]
+         (if (seq ~'new-rows)
+           (row-diff-impl ~'this ~'new-rows disj)
+           ~'this))
+       (~'all-rows [~'this]
+         ~'rows)
+       (~'arity-of [~'this]
+         ~'arity)
+       Object
+       (~'hashCode [~'this]
+         (bit-xor (* 31 ~'arity) (hash ~'rows)))
+       (~'equals [~'this ~'o]
+         (cond
+          (nil? ~'o) false
+          (identical? ~'this ~'o) true
+          (not= ~'arity (arity-of ~'o)) false
+          :else (= ~'rows (all-rows ~'o)))))))
+
+(TableRelHelper 20)
+
+(defn- make-table-rel
+  [^TableRel rel rows indexes]
+  (let [meta (.meta rel)
+        arity (.arity rel)
+        g (.g rel)
+        f (g rows indexes)]
+    (TableRel. meta rows indexes arity f g)))
+
+(defn- update-index
+  [index column rows f]
+  (persistent!
+   (reduce (fn [index row]
+             (let [key (nth row column)
+                   res (f (get index key #{}) row)]
+               (if (seq res)
+                 (assoc! index key res)
+                 (dissoc! index key))))
+           (transient index)
+           rows)))
+
+(defn- row-diff-impl
+  [^TableRel rel rows f]
+  (assert (if (seq rows) (= (count (first rows)) (.arity rel)) true))
+  (let [update-index (fn [res-index [col index]]
+                       (assoc res-index col (update-index index col rows f)))
+        indexes (reduce update-index {} (.indexes rel))
+        rows (reduce f (.rows rel) rows)]
+    (make-table-rel rel rows indexes)))
+
+(defmacro table-rel
+  "Drop in replacement for defrel. Returns an empty table rel."
+  [& cols]
+  (let [arity (count cols)
+        idxs (keep-indexed (fn [i sym] (if (:index (meta sym)) i)) cols)
+        indexes (zipmap idxs (repeat {}))]
+    `(let [g# (make-table-rel-ctor ~arity [~@idxs])
+           f# (g# #{} ~indexes)]
+       (TableRel. {} #{} ~indexes ~arity f# g#))))
+
+;; =============================================================================
 ;; Tabling
 
 ;; -----------------------------------------------------------------------------

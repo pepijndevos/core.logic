@@ -1087,6 +1087,77 @@
          '(1))))
 
 ;; -----------------------------------------------------------------------------
+;; Persistent memory tables
+
+(deftest test-mem-table-lookup
+  (let [rel-squares (add-rows (table-rel ^{:index true} n sq)
+                              (map #(vector % (* % %)) (range 1000)))]
+    (is (= (run* [q] (rel-squares 9 q)) [81]))
+    (is (= (run* [q] (rel-squares q 361)) [19]))))
+
+(deftest test-mem-table-updates
+  (let [rel1 (add-rows (table-rel ^{:index true} a b) [[1 2] [1 3] [2 3]])
+        rel2 (add-rows rel1 [[3 3]])
+        rel3 (remove-rows rel1 [[2 3]])]
+    (is (= (.rows rel1) #{[1 2] [1 3] [2 3]}))
+    (is (= (.rows rel2) #{[1 2] [1 3] [2 3] [3 3]}))
+    (is (= (.rows rel3) #{[1 2] [1 3]}))
+    
+    (is (= (.indexes rel1) {0 {1 #{[1 2] [1 3]}, 2 #{[2 3]}}}))
+    (is (= (.indexes rel2) {0 {1 #{[1 2] [1 3]}, 2 #{[2 3]}, 3 #{[3 3]}}}))
+    (is (= (.indexes rel3) {0 {1 #{[1 2] [1 3]}}}))))
+
+(deftest test-mem-table-no-index
+  (let [rel (add-rows (table-rel a b) [[1 2] [1 3] [2 3]])]
+    (is (= (.indexes rel) {}))
+    (is (= (set (run* [q] (rel 1 q))) #{2 3}))))
+
+(deftest test-mem-table-two-indexes
+  (let [empty-rel (table-rel ^{:index true} a ^{:index true} b c)
+        rel (add-rows empty-rel [[1 2 3] [2 2 4] [3 2 5] [2 3 5]])]
+    (is (= (.indexes rel)
+           {0 {1 #{[1 2 3]},
+               2 #{[2 2 4] [2 3 5]},
+               3 #{[3 2 5]}},
+            1 {2 #{[1 2 3] [2 2 4] [3 2 5]},
+               3 #{[2 3 5]}}}))
+    (is (= (run* [q]
+             (fresh [a b]
+               (== a 1)
+               (== b 2)
+               (rel a b q)))
+           [3]))))
+
+(deftest test-mem-table-partially-ground
+  (let [rel (add-rows (table-rel ^{:index true} a b) [[[1 2] 3] [[4 5] 6]])]
+    (is (= (run* [q]
+             (fresh [a b]
+               (== a 1)
+               (rel [a b] q)))
+           [3]))))
+
+(deftest test-mem-table-bad-arity
+  (let [rel (table-rel a b)]
+    ; Todo: Better error message
+    (is (thrown? AssertionError (add-rows rel [[1 2 3]])))
+    (is (thrown? AssertionError (add-rows rel [[1]])))
+    (is (= rel (add-rows rel [])))))
+
+(deftest test-mem-table-hash-equals
+  (let [rel1 (table-rel a b)
+        rel2 (table-rel ^{:index true} a b)
+        rows [[1 2] [3 4]]
+        rel1a (add-rows rel1 rows)
+        rel2a (add-rows rel2 rows)
+        rel3 (table-rel a b c)]
+    (is (= rel1 rel2))
+    (is (not= rel1 rel3))
+    (is (= rel1a rel2a))
+    (is (= (bit-xor (* 31 2) (hash #{})) (hash rel1)))
+    (is (= (bit-xor (* 31 2) (hash #{[1 2] [3 4]})) (hash rel1a)))
+    (is (= (bit-xor (* 31 3) (hash #{})) (hash rel3)))))
+
+;; -----------------------------------------------------------------------------
 ;; nil in collection
 
 (deftest test-nil-in-coll-1
