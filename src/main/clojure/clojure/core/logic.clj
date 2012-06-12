@@ -349,7 +349,7 @@
   (meta [this]
     meta)
   (withMeta [this new-meta]
-    (LVar. name hash meta))
+    (LVar. name hash new-meta))
   Object
   (toString [_] (str "<lvar:" name ">"))
   (equals [this o]
