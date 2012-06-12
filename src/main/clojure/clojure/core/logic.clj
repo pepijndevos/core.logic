@@ -182,7 +182,7 @@
     (let [vars (var-rands c)
           cid (inc cid)
           c (vary-meta c assoc :id cid)
-          ^ConstraintStore cs (reduce (fn [m v] (assoc this v c)) this vars)]
+          ^ConstraintStore cs (reduce (fn [m v] (assoc m v c)) this vars)]
       (ConstraintStore. (.km cs) (.cm cs) cid)))
   (updatec [this c]
     (let [id (-> c meta :id)
